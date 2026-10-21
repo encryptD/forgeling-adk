@@ -1,0 +1,15 @@
+specVersion: "3.0"
+metadata:
+  name: gatepass
+type: application
+framework:
+  name: SAPUI5
+  version: "1.145.0"
+server:
+  customMiddleware:
+    - name: fiori-tools-proxy
+      afterMiddleware: compression
+      configuration:
+        backend:
+          - path: /odata
+            url: http://localhost:4004

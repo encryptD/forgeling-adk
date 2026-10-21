@@ -1,0 +1,90 @@
+{
+  "_version": "1.12.0",
+  "sap.app": {
+    "id": "gatepass",
+    "type": "application",
+    "title": "Gate Passes",
+    "description": "GatePass List Report",
+    "applicationVersion": { "version": "1.0.0" },
+    "dataSources": {
+      "mainService": {
+        "uri": "/odata/v4/gate-pass/",
+        "type": "OData",
+        "settings": { "odataVersion": "4.0" }
+      }
+    }
+  },
+  "sap.ui": {
+    "technology": "UI5",
+    "deviceTypes": { "desktop": true, "tablet": true, "phone": true }
+  },
+  "sap.ui5": {
+    "flexEnabled": false,
+    "dependencies": {
+      "minUI5Version": "1.145.0",
+      "libs": {
+        "sap.m": {},
+        "sap.ui.core": {},
+        "sap.f": {},
+        "sap.fe.templates": {}
+      }
+    },
+    "models": {
+      "": {
+        "dataSource": "mainService",
+        "settings": {
+          "synchronizationMode": "None",
+          "operationMode": "Server",
+          "autoExpandSelect": true,
+          "earlyRequests": true,
+          "groupId": "$direct"
+        }
+      }
+    },
+    "routing": {
+      "routes": [
+        {
+          "pattern": ":?query:",
+          "name": "GatePassesList",
+          "target": "GatePassesList"
+        },
+        {
+          "pattern": "GatePasses({key}):?query:",
+          "name": "GatePassesObjectPage",
+          "target": "GatePassesObjectPage"
+        }
+      ],
+      "targets": {
+        "GatePassesList": {
+          "type": "Component",
+          "id": "GatePassesList",
+          "name": "sap.fe.templates.ListReport",
+          "options": {
+            "settings": {
+              "entitySet": "GatePasses",
+              "contextPath": "/GatePasses",
+              "variantManagement": "Page",
+              "initialLoad": true,
+              "navigation": {
+                "GatePasses": {
+                  "detail": { "route": "GatePassesObjectPage" }
+                }
+              }
+            }
+          }
+        },
+        "GatePassesObjectPage": {
+          "type": "Component",
+          "id": "GatePassesObjectPage",
+          "name": "sap.fe.templates.ObjectPage",
+          "options": {
+            "settings": {
+              "entitySet": "GatePasses",
+              "contextPath": "/GatePasses"
+            }
+          }
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="en" style="height:100%">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Gate Passes</title>
+  <script
+    id="sap-ui-bootstrap"
+    src="https://ui5.sap.com/1.145.0/resources/sap-ui-core.js"
+    data-sap-ui-theme="sap_horizon"
+    data-sap-ui-libs="sap.m,sap.ui.core,sap.f,sap.fe.templates"
+    data-sap-ui-resourceroots='{"gatepass":"./"}'
+    data-sap-ui-async="true"
+    data-sap-ui-compatVersion="edge"
+    data-sap-ui-frameOptions="allow"
+    data-sap-ui-xx-componentPreload="off"
+    data-sap-ui-xx-waitForTheme="true"
+  ></script>
+  <style>
+    html, body { height:100%; width:100%; margin:0; padding:0; }
+    #content, .sapUiComponentContainer, .sapMApp, .sapMPage,
+    .sapFDynamicPage, .sapFDynamicPageContent, .sapFDynamicPageContentFitContainer {
+      height:100%; width:100%;
+    }
+    #bootMsg { font: 14px/1.4 system-ui,sans-serif; padding: 16px; color:#333; }
+  </style>
+  <script>
+    (function () {
+      function show(msg) {
+        var el = document.getElementById("bootMsg");
+        if (el) el.textContent = msg;
+      }
+      function start() {
+        if (!window.sap || !sap.ui || !sap.ui.require) {
+          show("UI5 core failed to load from ui5.sap.com — check network/CDN.");
+          return;
+        }
+        sap.ui.require([
+          "sap/ui/core/ComponentContainer",
+          "sap/ui/core/Core"
+        ], function (ComponentContainer, Core) {
+          Core.ready().then(function () {
+            var body = document.getElementById("content");
+            if (!body) return;
+            body.innerHTML = "";
+            new ComponentContainer({
+              id: "container",
+              name: "gatepass",
+              height: "100%",
+              width: "100%",
+              async: true,
+              manifest: true,
+              handleValidation: true
+            }).placeAt("content");
+          });
+        });
+      }
+      setTimeout(start, 0);
+      setTimeout(function () {
+        if (!window.sap) show("Still waiting for UI5 CDN (ui5.sap.com/1.145.0)…");
+      }, 12000);
+    })();
+  </script>
+</head>
+<body class="sapUiBody sapUiSizeCompact" id="content" style="height:100%;width:100%">
+  <div id="bootMsg">Loading Gate Passes…</div>
+</body>
+</html>

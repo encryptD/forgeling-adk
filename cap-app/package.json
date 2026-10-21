@@ -1,0 +1,27 @@
+{
+  "name": "cap-app",
+  "version": "1.0.0",
+  "private": true,
+  "description": "GatePass CAP application",
+  "dependencies": {
+    "@sap/cds": "^10",
+    "@cap-js/sqlite": "^3",
+    "better-sqlite3": "^13",
+    "express": "^4"
+  },
+  "devDependencies": {
+    "@sap/cds-dk": "^10"
+  },
+  "scripts": {
+    "start": "cds-serve",
+    "watch": "cds watch"
+  },
+  "cds": {
+    "requires": {
+      "db": {
+        "kind": "sqlite",
+        "credentials": { "url": ":memory:" }
+      }
+    }
+  }
+}
