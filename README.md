@@ -1,8 +1,21 @@
 # ForgeLine on ADK Web
 
-One session. Four agents. One pause.
+One session. Triage, spec, gate, an implement/verify loop, review. One pause.
 
-Triage shapes the request. Spec writes the pack. The run stops. You approve or reject in the ADK Web dialog. Only an approval lets Implement run. Review checks the result and does not merge.
+Triage shapes the request. Spec writes the pack. The run stops. You approve or reject in the ADK Web dialog. Only an approval lets Implement run: the gate is enforced in code, not by the model. Implement and a deterministic verifier then loop (max 3) until `cds compile`, `cds build` and a `cds serve` smoke test pass. Review checks the result against the spec and the verifier report, and does not merge.
+
+```
+triage -> spec -> gate (human) -> build_loop[ implement -> verify ]x3 -> review
+```
+
+| Piece | Where | What it does |
+|-------|-------|--------------|
+| Human gate | `factory/tools.py` `approve_spec` | Requests its own confirmation; records `state["gate_result"]` = approved, approver, decided_at (UTC), note |
+| Gate enforcement | `factory/tools.py` `require_gate_approval` | `before_agent_callback` on build_loop, implement, verify, review: skipped unless `gate_result.approved is True` |
+| Verifier | `factory/verify.py` | static (JSON/YAML/`node --check`/FE rules) -> `cds compile` -> `cds build` -> `cds serve` smoke (GET `$metadata`, GET + POST `{}` per entity set) |
+| Fix loop | `factory/agent.py` `build_loop` | `LoopAgent(implement, VerifyAgent)`; compiler errors (file:line:col) go back to implement via `state["verify_result"]`; exits on pass, missing toolchain, or after 3 tries |
+
+The app is resumable (`factory.app`), so approving in the dialog resumes at the gate instead of restarting from triage.
 
 ## Run
 
@@ -31,6 +44,18 @@ When the dialog appears, that is the gate. Reject once in the demo if you want t
 - Spec pack before any code change is described.
 - A confirmation dialog that blocks implement.
 - Review that can fail the change.
+
+The verifier needs the CAP toolchain: run `npm ci` in `cap-app/` (Node >= 22, because `better-sqlite3` 13 builds from source and needs `make`/`g++`). Without it, verify reports `toolchain missing` and the loop stops instead of retrying.
+
+## Tests
+
+```bash
+pip install -r requirements-dev.txt
+python -m pytest -q -m "not integration"   # fast: no LLM, no network, no node
+(cd cap-app && npm ci) && python -m pytest -q -m integration   # real cds compile/build/serve
+```
+
+`tests/test_pipeline_flow.py` drives the real ADK runner with a scripted fake model to check gate pause/resume, rejection skipping, and the fix loop. CI (`.github/workflows/ci.yml`) runs both suites on push and PR.
 
 ## CAP app (cap-app)
 

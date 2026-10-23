@@ -1,12 +1,14 @@
 # ForgeLine factory skills
 
 Skills are markdown playbooks under `skills/<name>/SKILL.md`.  
-`factory/skills_loader.py` strips YAML frontmatter and injects the body into agent instructions.
+`factory/skills_loader.py` strips YAML frontmatter and injects the body into agent instructions **verbatim**.
+
+Agents use `instruction(template, *state_keys)`, an ADK `InstructionProvider`. ADK skips its own `{var}` state injection for providers, so braces in skill code samples (`{ vehicleNo }`, CDS `{ ... }`) are kept as-is; only the listed state keys (`{spec_pack}`, `{verify_result}`, ...) are filled. Do not write `{work_item}`-style state keys inside skill bodies (a unit test enforces this).
 
 ```python
-from .skills_loader import skill
+from .skills_loader import instruction, skill
 CAP = skill("sap-cap")
-FIORI = skill("sap-fiori-elements")
+agent = Agent(..., instruction=instruction(f"{CAP}\nSpec:\n{{spec_pack}}", "spec_pack"))
 ```
 
 ## Catalog
@@ -29,7 +31,7 @@ FIORI = skill("sap-fiori-elements")
 | [`sap-fiori-elements`](./sap-fiori-elements/SKILL.md) | One-screen pointer only | prefer boilerplate instead |
 | [`sap-fiori-elements/USAGE.md`](./sap-fiori-elements/USAGE.md) | Long operator docs | **never** inject into agents |
 
-Boilerplate encodes blank-UI fixes: `data-sap-ui-resourceroots`, height CSS, CDN 1.136.0, no orphan i18n, contextPath + ObjectPage nav, canonical `app/gatepass/` + `gatepass-service`.
+Boilerplate encodes blank-UI fixes: `data-sap-ui-resourceroots`, height CSS, CDN pinned to UI5 **1.145.0** (1.136.x blanked standalone FE), `ComponentContainer` bootstrap, no orphan i18n, contextPath + ObjectPage nav, canonical `app/gatepass/` + `gatepass-service`.
 
 ## SQLite bootstrap skill
 

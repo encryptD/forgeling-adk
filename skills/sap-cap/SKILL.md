@@ -113,7 +113,7 @@ If service CDS does not compile, `app/**/annotations.cds` UI.SelectionFields wil
 
 ## Handler shape
 
-Do not use JS destructuring braces in skill examples (ADK treats brace-ident as context vars).
+Skill text is passed to agents verbatim (InstructionProvider), so braces in examples are safe.
 When writing real handler files on disk, either style is fine.
 
 ```js

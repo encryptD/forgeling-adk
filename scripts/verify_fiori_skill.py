@@ -10,13 +10,15 @@ import json
 import sys
 from pathlib import Path
 
+import re
+
 from google.adk.runners import InMemoryRunner
 from google.genai import types
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from factory.agent import root_agent  # noqa: E402
+from factory.agent import app as factory_app, root_agent  # noqa: E402
 
 APP_NAME = "factory"
 USER_ID = "verify-user"
@@ -37,8 +39,8 @@ Existing CAP MVP under cap-app/ (edit in place):
 
 FE requirements (sap-fiori-elements Mode B):
 - app/gatepass with annotations.cds, package.json, ui5.yaml
-- webapp/Component.js, index.html (CDN UI5 bootstrap), manifest.json (List+ObjectPage),
-  i18n/i18n.properties
+- webapp/Component.js, index.html (CDN UI5 1.145.0 bootstrap with ComponentContainer),
+  manifest.json (List+ObjectPage) with hardcoded title/description (no i18n files)
 - OData URI /odata/v4/gate-pass/
 - annotations: HeaderInfo Title bound to number, LineItem, FieldGroup, Facets
 
@@ -63,12 +65,16 @@ def _text_of(event) -> str:
 
 
 def _pending_confirmation(events):
+    """Latest unanswered adk_request_confirmation call (answered ones are skipped)."""
+    answered = {
+        fr.id for e in events for fr in (e.get_function_responses() or []) if fr.id
+    }
     for event in reversed(events):
         lr = getattr(event, "long_running_tool_ids", None) or []
         if not lr:
             continue
         for fc in event.get_function_calls() or []:
-            if fc.id in lr and fc.name == "adk_request_confirmation":
+            if fc.id in lr and fc.name == "adk_request_confirmation" and fc.id not in answered:
                 return event, fc
     return None, None
 
@@ -93,6 +99,31 @@ async def _run_once(runner: InMemoryRunner, session_id: str, message: types.Cont
         if getattr(event, "long_running_tool_ids", None):
             print(f"  [paused HITL] {event.long_running_tool_ids}")
     return events
+
+
+def namespace_mismatch(schema_cds: str, service_cds: str) -> str | None:
+    """Compare db namespace with the namespace the service imports from ../db/schema.
+
+    Handles both `using my.cap as db from '../db/schema';` and
+    `using { my.cap.GatePass } from '../db/schema';` (the old regex only looked
+    for `using { x as`, which matched neither form the factory writes).
+    """
+    ns_m = re.search(r"^\s*namespace\s+([\w.]+)\s*;", schema_cds, re.M)
+    ns = ns_m.group(1) if ns_m else None
+    imported: set[str] = set()
+    for m in re.finditer(r"using\s+(.+?)\s+from\s+['\"][^'\"]*db/schema['\"]", service_cds, re.S):
+        target = m.group(1).strip()
+        if target.startswith("{"):
+            for item in target.strip("{} ").split(","):
+                name = item.strip().split(" as ")[0].strip()
+                if name:
+                    imported.add(name.rsplit(".", 1)[0] if "." in name else "")
+        else:
+            imported.add(target.split(" as ")[0].strip())
+    for got in imported:
+        if (got or None) != ns:
+            return f"namespace mismatch schema={ns} service using={got or '(none)'}"
+    return None
 
 
 def validate_generated_app() -> list[str]:
@@ -156,8 +187,17 @@ def validate_generated_app() -> list[str]:
         if "resources/sap-ui-core.js" in html and "ui5.sap.com" not in html and "sapui5" not in html.lower():
             # relative bootstrap without CDN is fragile under cds watch
             errors.append("index.html uses relative UI5 bootstrap without CDN")
-        if "sap/fe/core/AppComponent" not in html and "ComponentSupport" not in html:
-            errors.append("index.html missing ComponentSupport bootstrap")
+        # The boilerplate skill requires an explicit ComponentContainer bootstrap
+        # (ComponentSupport alone blanked standalone FE); AppComponent belongs in
+        # Component.js, not index.html.
+        if "ComponentContainer" not in html and "ComponentSupport" not in html:
+            errors.append("index.html missing ComponentContainer bootstrap")
+        if "1.145.0" not in html:
+            errors.append("index.html must pin UI5 1.145.0")
+
+    component = CAP_APP / "app/gatepass/webapp/Component.js"
+    if component.is_file() and "sap/fe/core/AppComponent" not in component.read_text():
+        errors.append("Component.js must extend sap/fe/core/AppComponent")
 
     ann = CAP_APP / "app/gatepass/annotations.cds"
     if ann.is_file():
@@ -199,7 +239,6 @@ def validate_generated_app() -> list[str]:
         raw = manifest_path.read_text()
         if 'KEY_TOKEN' in raw or '(<key>)' in raw:
             errors.append('manifest still has skill placeholder instead of UI5 {key} route token')
-        import re
         if not re.search(r'\(\{key\}\)', raw):
             # allow only if no object page - but we require object page
             if 'ObjectPage' in raw:
@@ -209,11 +248,9 @@ def validate_generated_app() -> list[str]:
     schema = CAP_APP / 'db/schema.cds'
     service = CAP_APP / 'srv/gatepass-service.cds'
     if schema.is_file() and service.is_file():
-        import re
-        ns = re.search(r'namespace\s+([\w.]+)', schema.read_text())
-        using = re.search(r'using\s*\{\s*([\w.]+)\s+as', service.read_text())
-        if ns and using and ns.group(1) != using.group(1):
-            errors.append(f'namespace mismatch schema={ns.group(1)} service using={using.group(1)}')
+        err = namespace_mismatch(schema.read_text(), service.read_text())
+        if err:
+            errors.append(err)
 
     return errors
 
@@ -221,7 +258,8 @@ def validate_generated_app() -> list[str]:
 async def main() -> int:
     print("== factory skill verification ==")
     print(f"cwd skill FIORI loaded via root_agent={root_agent.name}")
-    runner = InMemoryRunner(agent=root_agent, app_name=APP_NAME)
+    # Use the resumable App so the approval resumes at the gate.
+    runner = InMemoryRunner(app=factory_app)
     session = await runner.session_service.create_session(
         app_name=APP_NAME, user_id=USER_ID
     )
@@ -247,7 +285,7 @@ async def main() -> int:
                     function_response=types.FunctionResponse(
                         id=fc.id,
                         name="adk_request_confirmation",
-                        response={"confirmed": True, "payload": {"approved": True, "note": "verify skill"}},
+                        response={"confirmed": True, "payload": {"approver": "verify_fiori_skill.py", "note": "verify skill"}},
                     )
                 )
             ],
@@ -258,6 +296,12 @@ async def main() -> int:
             approve,
             invocation_id=getattr(event, "invocation_id", None),
         )
+
+    session = await runner.session_service.get_session(
+        app_name=APP_NAME, user_id=USER_ID, session_id=session.id
+    )
+    print("\n== gate ==", json.dumps(session.state.get("gate_result"), default=str)[:400])
+    print("== verify ==", json.dumps(session.state.get("verify_result"), default=str)[:1200])
 
     print("\n== filesystem validation ==")
     errors = validate_generated_app()
