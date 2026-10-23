@@ -1,13 +1,16 @@
-"""Human gate and write/verify tools for the factory."""
+"""Human gate, gate callback, and write/verify tools for the factory."""
 
 from __future__ import annotations
 
 import json
 import re
-import subprocess
+from datetime import datetime, timezone
 from pathlib import Path
 
 from google.adk.tools import ToolContext
+from google.genai import types
+
+from . import verify as _verify
 
 ROOT = Path(__file__).resolve().parent.parent / "cap-app"
 
@@ -316,29 +319,73 @@ MODE_B_FILES = (
 )
 
 
+GATE_STATE_KEY = "gate_result"
+
+
 def approve_spec(work_item_id: str, spec_summary: str, tool_context: ToolContext) -> dict:
-    """Pause until a person approves or rejects the spec pack."""
-    if not tool_context.tool_confirmation:
+    """Pause until a person approves or rejects the spec pack.
+
+    This tool owns its confirmation (do NOT also wrap it in
+    ``FunctionTool(require_confirmation=True)``, which would short-circuit
+    rejections before this body runs). First call: request confirmation and
+    return ``waiting``. Second call (ADK re-invokes with the person's
+    ToolConfirmation): record the decision in ``state["gate_result"]``.
+
+    ``ToolConfirmation.confirmed`` is the single source of truth; the payload
+    only carries an optional ``note`` and ``approver``.
+    """
+    confirmation = tool_context.tool_confirmation
+    if not confirmation:
         tool_context.request_confirmation(
             hint=(
                 f"Spec ready for {work_item_id}. Approve to allow implement. "
-                "Reject to stop. You are the gate; the agents are not."
+                "Reject to stop. You are the gate; the agents are not. "
+                "Optional payload: note, approver."
             ),
-            payload={"approved": False, "note": ""},
+            payload={"note": "", "approver": ""},
         )
         return {"status": "waiting", "work_item_id": work_item_id}
 
-    confirmed = bool(getattr(tool_context.tool_confirmation, "confirmed", False))
-    payload = getattr(tool_context.tool_confirmation, "payload", {}) or {}
-    approved = confirmed or bool(payload.get("approved"))
-    note = payload.get("note", "")
-    return {
+    payload = confirmation.payload if isinstance(confirmation.payload, dict) else {}
+    approved = bool(confirmation.confirmed)
+    decision = {
         "status": "approved" if approved else "rejected",
         "approved": approved,
         "work_item_id": work_item_id,
-        "note": note,
+        "approver": str(payload.get("approver") or tool_context.user_id or "unknown"),
+        "decided_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "note": str(payload.get("note") or ""),
         "spec_summary": spec_summary,
     }
+    tool_context.state[GATE_STATE_KEY] = decision
+    return decision
+
+
+def gate_approved(state) -> bool:
+    """True only when approve_spec recorded an explicit human approval."""
+    decision = state.get(GATE_STATE_KEY) if state is not None else None
+    return isinstance(decision, dict) and decision.get("approved") is True
+
+
+def require_gate_approval(callback_context) -> types.Content | None:
+    """before_agent_callback: skip this agent unless the human gate approved.
+
+    Returning Content makes ADK skip the agent's run entirely, so implement,
+    verify and review cannot write or judge anything without approval, no
+    matter what the model decides.
+    """
+    if gate_approved(callback_context.state):
+        return None
+    decision = callback_context.state.get(GATE_STATE_KEY)
+    why = (
+        f"gate {decision.get('status')} by {decision.get('approver')}"
+        if isinstance(decision, dict)
+        else "no gate decision recorded"
+    )
+    return types.Content(
+        role="model",
+        parts=[types.Part(text=f"blocked: {why}. {callback_context.agent_name} skipped.")],
+    )
 
 
 def _normalize_rel_path(path: str) -> str:
@@ -664,71 +711,43 @@ def write_gatepass_ui_shell_templates() -> dict:
     return {"ok": all(r.get("ok") for r in results.values()), "results": results}
 
 
-def _cds_bin() -> Path | None:
-    cand = ROOT / "node_modules" / ".bin" / "cds"
-    return cand if cand.is_file() else None
-
-
 def verify_cap_model() -> dict:
-    """Run cds compile * and require UI.SelectionFields in EDMX."""
-    errors: list[str] = []
-    cds = _cds_bin()
-    if not cds:
-        return {
-            "ok": False,
-            "errors": [
-                "node_modules/.bin/cds missing under cap-app — run npm install in cap-app"
-            ],
-            "hint": "npm install in cap-app, then re-verify",
-        }
+    """Run cds compile * --to edmx and report parsed compiler errors.
 
+    When an app/**/annotations.cds exists, the compiled EDMX must also contain
+    UI.SelectionFields and UI.LineItem.
+    """
+    errors: list[str] = []
     svc = ROOT / "srv" / "gatepass-service.cds"
     if svc.is_file():
         bad = _validate_cds_service(svc.read_text())
         if bad:
             errors.append(f"srv/gatepass-service.cds: {bad}")
 
-    try:
-        proc = subprocess.run(
-            [str(cds), "compile", "*", "--to", "edmx"],
-            cwd=str(ROOT),
-            capture_output=True,
-            text=True,
-            timeout=120,
-        )
-    except Exception as e:
-        return {"ok": False, "errors": [f"cds compile failed to run: {e}"]}
-
-    out = (proc.stdout or "") + (proc.stderr or "")
-    if proc.returncode != 0:
-        err_lines = [ln for ln in out.splitlines() if "ERROR" in ln or "Error" in ln][:8]
-        errors.extend(err_lines or [f"cds compile exit {proc.returncode}: {out[:300]}"])
-        errors.append(
-            "Service/model must compile or UI annotations never reach $metadata "
-            "(empty filter bar)."
-        )
+    step = _verify.check_compile(ROOT)
+    if step["status"] == _verify.SKIPPED:
         return {
             "ok": False,
-            "errors": errors,
-            "hint": "write_gatepass_schema_template (namespace my.cap) then write_gatepass_service_template; never inline @mandatory in projection",
+            "errors": errors + [step["reason"]],
+            "hint": _verify.NPM_HINT,
         }
-
-    if "SelectionFields" not in out:
-        errors.append(
-            "compiled EDMX missing UI.SelectionFields — "
-            "call write_gatepass_annotations_template"
-        )
-    if "LineItem" not in out:
-        errors.append("compiled EDMX missing UI.LineItem")
-
+    errors.extend(step["errors"])
     return {
         "ok": not errors,
         "errors": errors,
-        "has_selection_fields": "SelectionFields" in out,
+        "warnings": step["warnings"],
         "hint": None
         if not errors
-        else "write_gatepass_annotations_template + write_gatepass_service_template then re-verify",
+        else "fix the files named in errors (file:line:col), then re-verify",
     }
+
+
+def verify_project() -> dict:
+    """Run the full verifier: static checks, cds compile, cds build, serve smoke test.
+
+    Returns ok, toolchain_ok, per-step errors and a short summary.
+    """
+    return _verify.run_verification(ROOT)
 
 
 def verify_fiori_mode_b() -> dict:
