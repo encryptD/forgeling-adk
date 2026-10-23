@@ -1,11 +1,16 @@
+import warnings
+
 from google.adk.agents import Agent, SequentialAgent
+from google.adk.apps import App, ResumabilityConfig
 from google.adk.tools import FunctionTool
 from google.adk.planners import BuiltInPlanner
 from google.genai import types
 
-from factory.skills_loader import skill
+from factory.agent import clear_gate_decision
+from factory.skills_loader import instruction, skill
 from factory.tools import (
     approve_spec,
+    require_gate_approval,
     verify_cap_model,
     verify_fiori_mode_b,
     write_file,
@@ -16,6 +21,8 @@ from factory.tools import (
     write_gatepass_service_template,
     write_gatepass_ui_shell_templates,
 )
+
+warnings.filterwarnings("ignore", message=r".*SequentialAgent is deprecated.*")
 
 MODEL = "gemini-3.6-flash"
 CAP = skill("sap-cap", "sap-cap-sqlite", "sap-cap-service-path")
@@ -31,7 +38,7 @@ read_spec = Agent(
     model=MODEL,
     description="Reads the dropped product spec. Does not code.",
     planner=NO_THINK,
-    instruction=f"""
+    instruction=instruction(f"""
 The user dropped a spec for a new CAP app. There is no existing app.
 Follow the CAP skill. Do not write code.
 
@@ -40,7 +47,7 @@ Follow the CAP skill. Do not write code.
 Restate scope, out of scope, entity, fields with types/lengths, service name, entity set,
 exact handler file basename, validations, and whether Fiori is forbidden.
 Five to fifteen lines. If Fiori is not requested, say fiori=none.
-""",
+"""),
     output_key="mvp_brief",
 )
 
@@ -49,14 +56,17 @@ gate = Agent(
     model=MODEL,
     planner=NO_THINK,
     description="Pauses until a person approves the MVP brief.",
-    instruction=f"""
+    instruction=instruction(f"""
 {GATE}
-Read {{mvp_brief}}.
+Read the brief:
+{{mvp_brief}}
+
 If it is a greeting, small talk, or not a CAP spec, reply that you are waiting for a spec. Do not call approve_spec.
-If it is a CAP spec or real brief, call approve_spec once. work_item_id is mvp-001. Summary is {{mvp_brief}}.
-""",
-    tools=[FunctionTool(approve_spec, require_confirmation=True)],
-    output_key="gate_result",
+If it is a CAP spec or real brief, call approve_spec once. work_item_id is mvp-001. Summary is the brief above.
+""", "mvp_brief"),
+    # approve_spec owns its confirmation and writes state["gate_result"].
+    tools=[FunctionTool(approve_spec)],
+    before_agent_callback=clear_gate_decision,
 )
 
 build = Agent(
@@ -64,7 +74,7 @@ build = Agent(
     model=MODEL,
     planner=NO_THINK,
     description="Emits a new CAP app from the approved brief.",
-    instruction=f"""
+    instruction=instruction(f"""
 You are the builder. Follow the CAP skill. Fiori only if the brief explicitly requires it.
 
 {CAP}
@@ -105,7 +115,7 @@ then package.json, ui5.yaml, webapp/Component.js, index.html, manifest.json.
 Then call verify_fiori_mode_b; if ok is false, fix and re-verify.
 
 Then list the paths you wrote and verify result. Label it the MVP.
-""",
+""", "gate_result"),
     tools=[
         FunctionTool(write_file),
         FunctionTool(write_cap_package_template),
@@ -118,13 +128,14 @@ Then list the paths you wrote and verify result. Label it the MVP.
         FunctionTool(verify_fiori_mode_b),
     ],
     output_key="mvp_app",
+    before_agent_callback=require_gate_approval,
 )
 
 review = Agent(
     name="review",
     model=MODEL,
     description="Checks the MVP against the brief.",
-    instruction=f"""
+    instruction=instruction(f"""
 You are review.
 
 {REVIEW}
@@ -136,12 +147,20 @@ You are review.
 Read {{mvp_brief}} and {{mvp_app}}. If blocked, say review skipped.
 Fail if app/ exists when fiori=none, dual handlers, basename mismatch, extra fields, corrupt file content,
 or files landed under nested cap-app/cap-app/ instead of cap-app/ root.
-""",
+""", "mvp_brief", "mvp_app"),
+    tools=[FunctionTool(verify_cap_model), FunctionTool(verify_fiori_mode_b)],
     output_key="review_note",
+    before_agent_callback=require_gate_approval,
 )
 
 root_agent = SequentialAgent(
     name="mvp",
     description="Build a new CAP app from a dropped spec, with a human gate.",
     sub_agents=[read_spec, gate, build, review],
+)
+
+app = App(
+    name="mvp",
+    root_agent=root_agent,
+    resumability_config=ResumabilityConfig(is_resumable=True),
 )
